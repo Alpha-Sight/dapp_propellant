@@ -10,14 +10,12 @@ use sha2::{Sha256, Digest};
 
 // use crate::auth::jwt::verify;
 use crate::error::ContractError;
-use crate::helpers::{check_global_reset, check_payment, create_log_entry, is_valid_email};
+use crate::helpers::{check_global_reset, check_payment, create_log_entry};
 use crate::msg::{
-    AllTierConfigsResponse, ConfigResponse, ExecuteMsg, InstantiateMsg, QueryMsg,
-    TierConfigResponse, TotalUsersResponse, UserAddressResponse, UserResponse,
-    UserSubscriptionResponse,
+    AllTierConfigsResponse, ConfigResponse, ExecuteMsg, GetUserTokenResponse, InstantiateMsg, QueryMsg, TierConfigResponse, TotalUsersResponse, UserResponse, UserSubscriptionResponse
 };
 use crate::state::{
-    tier_to_key, Config, SubscriptionTier, TierConfig, User, UserSubscription, CONFIG, EMAIL_TO_ADDR, LAST_GLOBAL_RESET, TIER_CONFIGS, TOTAL_CVS, TOTAL_PAID_USERS, TOTAL_USERS, USERS
+    tier_to_key, Config, SubscriptionTier, TierConfig, User, UserSubscription, CONFIG, LAST_GLOBAL_RESET, TIER_CONFIGS, TOTAL_CVS, TOTAL_PAID_USERS, TOTAL_USERS, USERS
 };
 
 // version info for migration info
@@ -129,12 +127,12 @@ pub fn execute(
         } => execute_configure_tier(deps, env, info, tier, price, cv_limit, treasury_address),
 
         // User management
-        ExecuteMsg::RegisterUser { email, name, public_key, signature } => {
-            execute_register_user(deps, env, info, email, name, public_key, signature)
+        ExecuteMsg::RegisterUser { name } => {
+            execute_register_user(deps, env, info, name)
         },
         ExecuteMsg::UpdateLastLogin {} => execute_update_last_login(deps, env, info),
-        ExecuteMsg::UpdateUserProfile { name, email } => {
-            execute_update_profile(deps, env, info, name, email)
+        ExecuteMsg::UpdateUserProfile { name } => {
+            execute_update_profile(deps, env, info, name)
         }
         ExecuteMsg::UpdatePublicKey { public_key, signature } => {
             execute_update_public_key(deps, env, info, public_key, signature)
@@ -144,12 +142,12 @@ pub fn execute(
         ExecuteMsg::LinkUserToTreasury { user_address } => {
             execute_link_user_to_treasury(deps, env, info, user_address)
         }
-        ExecuteMsg::RecordCvGeneration { user_address, signature } => {
-            let timestamp = env.block.time.seconds();
-            execute_record_cv_generation(deps, env, info, user_address, timestamp, signature)
+        ExecuteMsg::RecordCvGeneration {} => {
+            // let timestamp = env.block.time.seconds();
+            execute_record_cv_generation(deps, env, info)
         }
-        ExecuteMsg::DeductCvCredit { user_address, signature } => {
-            execute_deduct_cv_credit(deps, env, info, user_address, signature)
+        ExecuteMsg::DeductCvCredit { user_address, secure_token } => {
+            execute_deduct_cv_credit(deps, env, info, user_address, secure_token)
         }
     }
 }
@@ -159,7 +157,7 @@ pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
     match msg {
         QueryMsg::GetConfig {} => to_json_binary(&query_config(deps)?),
         QueryMsg::GetUser { address } => to_json_binary(&query_user(deps, address)?),
-        QueryMsg::GetUserByEmail { email } => to_json_binary(&query_user_by_email(deps, email)?),
+        QueryMsg::GetUserToken { address } => to_json_binary(&query_user_token(deps, address)?),
         QueryMsg::GetTotalUsers {} => to_json_binary(&query_total_users(deps)?),
         QueryMsg::GetTierConfig { tier } => to_json_binary(&query_tier_config(deps, tier)?),
         QueryMsg::GetAllTierConfigs {} => to_json_binary(&query_all_tier_configs(deps)?),
@@ -173,89 +171,58 @@ pub fn execute_register_user(
     deps: DepsMut,
     env: Env,
     info: MessageInfo,
-    email: String,
     name: Option<String>,
-    public_key: String,
-    signature: String,
 ) -> Result<Response, ContractError> {
     let sender = info.sender.clone();
 
-    // Basic validation
-    if !is_valid_email(&email) {
-        return Err(ContractError::InvalidEmail {});
-    }
-
-    // Check if email is already registered
-    if EMAIL_TO_ADDR.may_load(deps.storage, &email)?.is_some() {
-        return Err(ContractError::EmailAlreadyRegistered {});
-    }
-
     // Check if wallet address is already registered
-    if USERS.may_load(deps.storage, &sender)?.is_some() {
-        return Err(ContractError::WalletAlreadyRegistered {});
-    }
-    
-    // Validate public key format (try to decode from base64)
-    match base64::decode(&public_key) {
-        Ok(bytes) => {
-            // Check if it's a valid ed25519 public key (32 bytes)
-            if bytes.len() != 32 {
-                return Err(ContractError::Std(StdError::generic_err(
-                    "Invalid public key length"
-                )));
-            }
-        },
-        Err(_) => {
-            return Err(ContractError::Std(StdError::generic_err(
-                "Invalid public key encoding"
-            )));
-        }
-    }
-    
-    // Verify signature to prove ownership of the private key
-    // Message should be a combination of address, email, and timestamp
-    let timestamp = env.block.time.seconds().to_string();
-    let message_to_verify = format!("{}:{}:{}", sender, email, timestamp);
-    
-    if !crate::crypto::verify_signature(&public_key, &message_to_verify, &signature)? {
-        return Err(ContractError::Std(StdError::generic_err(
-            "Invalid signature - cannot verify ownership of private key"
-        )));
+    if let Some(existing_user) = USERS.may_load(deps.storage, &sender)? {
+        // Wallet already registered, return existing user data
+        return Ok(Response::new()
+            .add_attribute("action", "get_existing_user")
+            .add_attribute("name", existing_user.name().cloned().unwrap_or_default())
+            .add_attribute("tier", existing_user.subscription().tier().to_string())
+            .add_attribute("cvs_generated", existing_user.subscription().cvs_generated().to_string())
+            .add_attribute("is_existing_user", "true")
+            // Load tier config to get CV limit
+            .add_attribute("cv_limit", {
+                let tier_key = tier_to_key(existing_user.subscription().tier());
+                let tier_config = TIER_CONFIGS.load(deps.storage, &tier_key)?;
+                tier_config.cv_limit().to_string()
+            })
+        );
     }
 
     // Current timestamp
     let now = env.block.time.seconds();
 
-    // Load the Free tier config using string key
-    // let free_key = tier_to_key(&SubscriptionTier::Free);
-    // let free_tier_config = TIER_CONFIGS.load(deps.storage, &free_key)?;
-
-    // Create free subscription for the user
+    // Load the Free tier config to get its CV limit
+    let free_key = tier_to_key(&SubscriptionTier::Free);
+    let free_tier_config = TIER_CONFIGS.load(deps.storage, &free_key)?;
+    
+    // Create free subscription with CV limit from tier config
     let subscription = UserSubscription::new(
         SubscriptionTier::Free,
-        0,
-        u64::MAX,   // Free tier doesn't expire
-        false,      // Not linked to treasury yet
-        now,        // Set initial reset time to now
-        None,
-        None,
+        0,  // No CVs generated yet
+        u64::MAX,  // Free tier doesn't expire
+        false,     // Not linked to treasury yet
+        now,       // Set initial reset time to now
+        None,      // No signature needed
+        None,      // No session token needed
     );
 
-    // Create new user with free subscription and public key
+    // Create new user with free subscription
     let user = User::new(
         sender.clone(),
-        email.clone(),
-        true, // Pre-verified by Abstraxion/Burnt wallet
         now,
         now,
         name,
         subscription,
-        Some(public_key.clone()),
+        None,
     );
 
     // Save user data
     USERS.save(deps.storage, &sender, &user)?;
-    EMAIL_TO_ADDR.save(deps.storage, &email, &sender)?;
 
     // Increment user counter
     let total_users = TOTAL_USERS.load(deps.storage)? + 1;
@@ -266,12 +233,12 @@ pub fn execute_register_user(
 
     Ok(Response::new()
         .add_attribute("action", "register_user")
-        .add_attribute("email", email)
         .add_attribute("tier", "Free")
-        .add_attribute("public_key_registered", "true")
-        .add_attribute("signature_verified", "true")
+        .add_attribute("cv_limit", free_tier_config.cv_limit().to_string())
+        .add_attribute("is_existing_user", "false")
         .add_attributes(log_entry))
 }
+
 
 pub fn execute_update_public_key(
     deps: DepsMut,
@@ -446,61 +413,39 @@ pub fn execute_record_cv_generation(
     mut deps: DepsMut,
     env: Env,
     info: MessageInfo,
-    user_address: String,
-    timestamp: u64,
-    signature: String,
 ) -> Result<Response, ContractError> {
-    // Validate user address
-    let user_addr = deps.api.addr_validate(&user_address)?;
+    let sender = info.sender.clone();
 
-    // Check if we need a global reset
-    let global_reset = check_global_reset(&mut deps, &env)?;
-
-    // Check if user exists and get their data
+    // Check if user exists
     let mut user = USERS
-        .may_load(deps.storage, &user_addr)?
+        .may_load(deps.storage, &sender)?
         .ok_or(ContractError::UserNotFound {})?;
     
-    // Check if the user has a public key
-    let public_key = user.public_key().clone().ok_or(
-        ContractError::Std(StdError::generic_err("User has no public key registered"))
-    )?;
+    // Check if user already has an active CV generation request
+    if user.subscription().session_token().is_some() {
+        return Err(ContractError::Std(StdError::generic_err(
+            "You already have an active CV generation request"
+        )));
+    }
+
+    // Check for global reset (monthly)
+    let global_reset = check_global_reset(&mut deps, &env)?;
 
     // If global reset happened and user is on free tier, reset their credits
-    let mut user_reset = false;
+    let mut _user_reset = false;
     if global_reset && matches!(user.subscription().tier(), SubscriptionTier::Free) {
         user.subscription_mut().set_cvs_generated(0);
-        user_reset = true;
+        _user_reset = true;
     }
 
     // Get user's tier config
-    let tier_key = tier_to_key(&user.subscription().tier());
+    let tier_key = tier_to_key(user.subscription().tier());
     let tier_config = TIER_CONFIGS.load(deps.storage, &tier_key)?;
-
-    // Create the message that was signed (user address + timestamp)
-    let message = format!("{}{}", user_addr, timestamp);
-    
-    // Verify signature
-    if !verify_signature(&public_key, &message, &signature)? {
-        return Err(ContractError::Unauthorized {});
-    }
-    
-    // Check authorization (allow admin, treasury, or the user themselves)
-    let config = CONFIG.load(deps.storage)?;
-    let is_authorized = info.sender == user_addr 
-        || info.sender == config.admin()
-        || info.sender == tier_config.treasury_address();
-    
-    if !is_authorized {
-        return Err(ContractError::Unauthorized {});
-    }
 
     // Check if user's subscription is expired
     let now = env.block.time.seconds();
     if now > user.subscription().expiration() {
-        return Err(ContractError::Std(StdError::generic_err(
-            "Subscription expired",
-        )));
+        return Err(ContractError::Std(StdError::generic_err("Subscription expired")));
     }
 
     // Check if user has reached CV limit
@@ -511,48 +456,75 @@ pub fn execute_record_cv_generation(
         ))));
     }
     
-    // Generate a secure token for backend communication
-    let nonce = format!("{:x}", Sha256::digest(signature.as_bytes()));
-    let session_token = generate_encrypted_secure_token(
-        &user_addr.to_string(), 
-        now, 
-        &nonce, 
+    // Retrieve or generate public key for the user
+    let public_key = match user.public_key() {
+        Some(pk) => pk.clone(),
+        None => {
+            // Generate a deterministic public key based on user address and timestamp
+            let seed_material = format!("{}:{}", sender.to_string(), now / 86400); // Daily rotation
+            let key_hash = Sha256::digest(seed_material.as_bytes());
+            base64::encode(&key_hash[0..32]) // Use first 32 bytes as key
+        }
+    };
+    
+    // Generate a unique nonce using block data
+    let nonce = format!("{}:{}:{}", 
+        env.block.height,
+        env.block.time.nanos(),
+        hex::encode(&Sha256::digest(sender.to_string().as_bytes())[0..4])
+    );
+    
+    // Generate an encrypted secure token
+    let encrypted_token = generate_encrypted_secure_token(
+        &sender.to_string(),
+        now,
+        &nonce,
         &public_key
-    )?;    
-    // Store the signature associated with the user
-    user.subscription_mut().set_signature(Some(signature.clone()));
-    user.subscription_mut().set_session_token(Some(session_token.clone()));
+    )?;
+    
+    // Store the token in the user's session_token
+    user.subscription_mut().set_session_token(Some(encrypted_token.clone()));
+    
+    // Store/update the public key
+    user.set_public_key(Some(public_key.clone()));
+    
+    // Update user's last login time
+    user.set_last_login(now);
     
     // Save updated user data
-    USERS.save(deps.storage, &user_addr, &user)?;
-
-    // Emit an event with the session token for backend
-    let event = Event::new("cv_request")
-        .add_attribute("user", user_addr.to_string())
-        .add_attribute("timestamp", timestamp.to_string())
-        .add_attribute("token", session_token);
-
+    USERS.save(deps.storage, &sender, &user)?;
+    
+    // Create a frontend token (different format for passing to backend)
+    // Format: encrypted_token:public_key:address
+    let frontend_token = format!("{}:{}:{}", 
+        encrypted_token,
+        public_key,
+        sender.to_string()
+    );
+    
+    // Build the response with the token in attributes
     Ok(Response::new()
-        .add_event(event)
         .add_attribute("action", "record_cv_generation")
-        .add_attribute("user", user_addr.to_string())
-        .add_attribute("tier", format!("{:?}", user.subscription().tier()))
-        .add_attribute("cv_count", user.subscription().cvs_generated().to_string())
-        .add_attribute("cv_limit", tier_config.cv_limit().to_string())
-        .add_attribute("remaining_credits", 
-            (tier_config.cv_limit() - user.subscription().cvs_generated()).to_string())
-        .add_attribute("global_reset", global_reset.to_string())
-        .add_attribute("credits_reset", user_reset.to_string()))
+        .add_attribute("token", frontend_token))
 }
 
 // Update credit deduction function
 pub fn execute_deduct_cv_credit(
     deps: DepsMut,
     env: Env,
-    _info: MessageInfo,
+    info: MessageInfo,
     user_address: String,
-    signature: String,
+    secure_token: String,
 ) -> Result<Response, ContractError> {
+    // Load config
+    let config = CONFIG.load(deps.storage)?;
+    
+    // Only admins or authorized services can call this function
+    if info.sender != config.admin() && 
+       info.sender != config.treasury_admin() {
+        return Err(ContractError::Unauthorized {});
+    }
+    
     // Validate user address
     let user_addr = deps.api.addr_validate(&user_address)?;
 
@@ -561,33 +533,63 @@ pub fn execute_deduct_cv_credit(
         .may_load(deps.storage, &user_addr)?
         .ok_or(ContractError::UserNotFound {})?;
     
-    // Get the user's public key
-    let public_key = user.public_key().clone().ok_or(
-        ContractError::Std(StdError::generic_err("User has no public key registered"))
-    )?;
+    // Parse the frontend token: encrypted_token:public_key:address
+    let token_parts: Vec<&str> = secure_token.split(':').collect();
+    if token_parts.len() < 5 {  // We need at least 5 parts (3 for encrypted token + public_key + address)
+        return Err(ContractError::Std(StdError::generic_err(
+            "Invalid token format"
+        )));
+    }
     
-    // Get session token from previous request
-    let encrypted_token = user.subscription().session_token().clone().ok_or(
+    // Extract parts - the first 3 parts belong to the encrypted token
+    let encrypted_token = format!("{}:{}:{}", token_parts[0], token_parts[1], token_parts[2]);
+    let provided_public_key = token_parts[3];
+    let provided_address = token_parts[4];
+    
+    // Verify address matches
+    if provided_address != user_address {
+        return Err(ContractError::Std(StdError::generic_err(
+            "Token address mismatch"
+        )));
+    }
+    
+    // Get stored token from user record
+    let stored_token = user.subscription().session_token().clone().ok_or(
         ContractError::Std(StdError::generic_err("No active CV generation request"))
     )?;
     
-  // First verify the signature matches the encrypted token
-    let message = format!("{}{}", user_addr, encrypted_token);
-    if !verify_signature(&public_key, &message, &signature)? {
-        return Err(ContractError::Unauthorized {});
+    // Tokens must match exactly
+    if stored_token != encrypted_token {
+        return Err(ContractError::Std(StdError::generic_err(
+            "Token doesn't match user's stored token"
+        )));
     }
-
-    // Then decrypt and verify the token itself (validates timestamp, etc.)
-    let _decrypted_token = decrypt_and_verify_secure_token(
+    
+    // Get stored public key
+    let stored_public_key = user.public_key().clone().ok_or(
+        ContractError::Std(StdError::generic_err("No public key found for user"))
+    )?;
+    
+    // Public keys must match
+    if stored_public_key != provided_public_key {
+        return Err(ContractError::Std(StdError::generic_err(
+            "Public key mismatch"
+        )));
+    }
+    
+    // Decrypt and verify the token
+    let _ = decrypt_and_verify_secure_token(
         &encrypted_token,
-        &user_addr.to_string(),
-        &public_key,
+        &user_address,
+        &stored_public_key,
         3600, // 1 hour validity
         env.block.time.seconds()
     )?;
-       
-     // Get user's tier config to check their credit limit
-    let tier_key = tier_to_key(&user.subscription().tier());
+    
+    // Token is valid - proceed with credit deduction
+    
+    // Get user's tier config
+    let tier_key = tier_to_key(user.subscription().tier());
     let tier_config = TIER_CONFIGS.load(deps.storage, &tier_key)?;
 
     // Check if user has credits remaining
@@ -609,11 +611,8 @@ pub fn execute_deduct_cv_credit(
         let remaining = tier_config.cv_limit() - cvs_generated;
         
         return Ok(Response::new()
-            .add_attribute("action", "deduct_cv_credit")
-            .add_attribute("user", user_addr.to_string())
-            .add_attribute("cv_count", cvs_generated.to_string())
-            .add_attribute("credits_remaining", remaining.to_string())
-            .add_attribute("total_cvs", total_cvs.to_string()));
+        .add_attribute("action", "deduct_cv_credit")
+        .add_attribute("credits_remaining", remaining.to_string()));
     } else {
         return Err(ContractError::Std(StdError::generic_err(format!(
             "Credit limit reached: {}", tier_config.cv_limit()
@@ -753,7 +752,6 @@ pub fn execute_update_profile(
     env: Env,
     info: MessageInfo,
     name: Option<String>,
-    email: Option<String>,
 ) -> Result<Response, ContractError> {
     let sender = info.sender.clone();
 
@@ -762,31 +760,6 @@ pub fn execute_update_profile(
         .may_load(deps.storage, &sender)?
         .ok_or(ContractError::UserNotFound {})?;
 
-    // Update email if provided
-    if let Some(new_email) = email {
-        // Validate email format
-        if !is_valid_email(&new_email) {
-            return Err(ContractError::InvalidEmail {});
-        }
-
-        // Check if new email is already registered
-        if new_email != *user.email() {
-            if let Some(_) = EMAIL_TO_ADDR.may_load(deps.storage, &new_email)? {
-                return Err(ContractError::EmailAlreadyRegistered {});
-            }
-
-            // Remove old email mapping
-            EMAIL_TO_ADDR.remove(deps.storage, &user.email());
-
-            // Add new email mapping
-            EMAIL_TO_ADDR.save(deps.storage, &new_email, &sender)?;
-
-            // Update user's email
-            user.set_email(new_email);
-            // Keep email verified status (pre-verified by integration)
-            user.set_email_verified(true);
-        }
-    }
 
     // Update name if provided
     if let Some(new_name) = name {
@@ -886,18 +859,32 @@ pub fn query_user(deps: Deps, address: Option<String>) -> StdResult<UserResponse
     Ok(UserResponse { user })
 }
 
-// Find user address by email
-pub fn query_user_by_email(deps: Deps, email: String) -> StdResult<UserAddressResponse> {
-    let address = EMAIL_TO_ADDR.may_load(deps.storage, &email)?;
-
-    Ok(UserAddressResponse { address })
-}
 
 // Get total users count
 pub fn query_total_users(deps: Deps) -> StdResult<TotalUsersResponse> {
     let total_users = TOTAL_USERS.load(deps.storage)?;
 
     Ok(TotalUsersResponse { total_users })
+}
+
+fn query_user_token(deps: Deps, address: String) -> StdResult<GetUserTokenResponse> {
+    // Validate address
+    let addr = deps.api.addr_validate(&address)?;
+    
+    // Get user data
+    let user = USERS.load(deps.storage, &addr)?;
+    
+    // Extract the token and check if it exists
+    let token = user.subscription().session_token().clone();
+    let has_active_token = token.is_some();
+    
+    // Return the properly structured response
+    Ok(GetUserTokenResponse {
+        user_address: addr.to_string(),
+        has_active_token,
+        token,
+        timestamp: user.last_login(),
+    })
 }
 
 // Get tier configuration

@@ -539,11 +539,36 @@ mod tests {
     fn test_deterministic_random() {
         let env = mock_env();
         
-        // Define the get_entropy_bytes function
+        // Define the get_entropy_bytes function that can handle any requested length
         fn get_entropy_bytes(env: &Env, seed: &str, length: usize) -> Vec<u8> {
             let combined_seed = format!("{}:{}", env.block.time.seconds(), seed);
-            let hash = Sha256::digest(combined_seed.as_bytes());
-            hash[0..length].to_vec()
+            let initial_hash = Sha256::digest(combined_seed.as_bytes());
+            
+            // If requested length is within hash size, return directly
+            if length <= initial_hash.len() {
+                return initial_hash[0..length].to_vec();
+            }
+            
+            // For larger sizes, generate multiple hashes
+            let mut result = Vec::with_capacity(length);
+            result.extend_from_slice(&initial_hash);
+            
+            // Generate additional hashes until we have enough bytes
+            let mut counter = 0;
+            while result.len() < length {
+                // Create a new seed with counter to get different hash each time
+                let additional_seed = format!("{}:{}:{}", combined_seed, counter, result.len());
+                let additional_hash = Sha256::digest(additional_seed.as_bytes());
+                
+                // Add as many bytes as needed to reach requested length
+                let bytes_needed = length - result.len();
+                let bytes_to_add = std::cmp::min(bytes_needed, additional_hash.len());
+                result.extend_from_slice(&additional_hash[0..bytes_to_add]);
+                
+                counter += 1;
+            }
+            
+            result
         }
         
         // Generate pseudorandom bytes

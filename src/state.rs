@@ -182,8 +182,6 @@ impl UserSubscription {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 pub struct User {
     address: Addr,                   // User's blockchain wallet address
-    email: String,                   // User's email address
-    email_verified: bool,            // Whether email has been verified
     registration_date: u64,          // When user registered (timestamp)
     last_login: u64,                 // When user last logged in (timestamp)
     name: Option<String>,            // User's display name (optional)
@@ -192,11 +190,9 @@ pub struct User {
 }
 
 impl User {
-    pub fn new(address: Addr, email: String, email_verified: bool, registration_date: u64, last_login: u64, name: Option<String>, subscription: UserSubscription, public_key: Option<String>) -> Self {
+    pub fn new(address: Addr, registration_date: u64, last_login: u64, name: Option<String>, subscription: UserSubscription, public_key: Option<String>) -> Self {
         Self {
             address,
-            email,
-            email_verified,
             registration_date,
             last_login,
             name,
@@ -207,14 +203,6 @@ impl User {
 
     pub fn address(&self) -> &Addr {
         &self.address
-    }
-
-    pub fn email(&self) -> &String {
-        &self.email
-    }
-
-    pub fn email_verified(&self) -> bool {
-        self.email_verified
     }
 
     pub fn registration_date(&self) -> u64 {
@@ -239,14 +227,6 @@ impl User {
     
     pub fn set_public_key(&mut self, key: Option<String>) {
         self.public_key = key;
-    }
-
-    pub fn set_email_verified(&mut self, email_verified: bool) {
-        self.email_verified = email_verified;
-    }
-
-    pub fn set_email(&mut self, email: String) {
-        self.email = email;
     }
 
     pub fn set_last_login(&mut self, last_login: u64) {
@@ -461,8 +441,6 @@ mod tests {
     #[test]
     fn test_user() {
         let address = Addr::unchecked("user1");
-        let email = "test@example.com".to_string();
-        let email_verified = true;
         let registration_date = 1714400000u64;
         let last_login = 1714400100u64;
         let name = Some("Test User".to_string());
@@ -483,8 +461,6 @@ mod tests {
         // Create a new user
         let mut user = User::new(
             address.clone(),
-            email.clone(),
-            email_verified,
             registration_date,
             last_login,
             name.clone(),
@@ -494,8 +470,6 @@ mod tests {
 
         // Test getters
         assert_eq!(*user.address(), address);
-        assert_eq!(*user.email(), email);
-        assert_eq!(user.email_verified(), email_verified);
         assert_eq!(user.registration_date(), registration_date);
         assert_eq!(user.last_login(), last_login);
         assert_eq!(user.name(), name.as_ref());
@@ -503,8 +477,6 @@ mod tests {
         assert_eq!(*user.public_key(), public_key);
 
         // Test setters
-        let new_email = "newemail@example.com".to_string();
-        let new_email_verified = false;
         let new_last_login = 1714400200u64;
         let new_name = Some("New Name".to_string());
         let new_public_key = Some("new_base64_encoded_key".to_string());
@@ -520,15 +492,12 @@ mod tests {
             None,
         );
 
-        user.set_email(new_email.clone());
-        user.set_email_verified(new_email_verified);
         user.set_last_login(new_last_login);
         user.set_name(new_name.clone());
         user.set_subscription(new_subscription);
         user.set_public_key(new_public_key.clone());
 
-        assert_eq!(*user.email(), new_email);
-        assert_eq!(user.email_verified(), new_email_verified);
+
         assert_eq!(user.last_login(), new_last_login);
         assert_eq!(user.name(), new_name.as_ref());
         assert_eq!(user.subscription().tier(), &SubscriptionTier::Basic);

@@ -44,20 +44,24 @@ pub enum ExecuteMsg {
     
     /// Register a new user with email-wallet link from Abstraxion
     RegisterUser {
-        email: String,
         name: Option<String>,
-        public_key: String, // Base64 encoded public key
-        signature: String,
         // Wallet address comes from msg.sender
     },
     
+    RecordCvGeneration {},  // No parameters needed - uses sender's address
+    
+    /// Deduct CV credit - modified to use secure token
+    DeductCvCredit { 
+        user_address: String,
+        secure_token: String,  // Use secure token instead of signature
+    },
+
     /// Update user's last login timestamp
     UpdateLastLogin {},
     
     /// Update user profile information
     UpdateUserProfile {
         name: Option<String>,
-        email: Option<String>,
     },
 
     // Add message to update public key
@@ -78,14 +82,7 @@ pub enum ExecuteMsg {
     /// Link user to treasury contract (requires treasury_admin)
     LinkUserToTreasury {
         user_address: String,
-    },
-    
-    /// Record a CV generation
-    RecordCvGeneration {
-        user_address: String,
-        signature: String,
-    },
-    DeductCvCredit { user_address: String, signature: String },
+    }
 }
 
 //------------------------------------------------------------------------
@@ -103,12 +100,6 @@ pub enum QueryMsg {
     #[returns(UserResponse)]
     GetUser { 
         address: Option<String> // If None, uses caller's address
-    },
-    
-    /// Look up a user address by email
-    #[returns(UserAddressResponse)]
-    GetUserByEmail { 
-        email: String 
     },
     
     /// Get total number of registered users
@@ -130,6 +121,10 @@ pub enum QueryMsg {
     GetUserSubscription {
         address: String
     },
+
+    #[returns(GetUserTokenResponse)]
+    GetUserToken { address: String },
+
 }
 
 // We define a custom struct for each query response
@@ -171,3 +166,13 @@ pub struct UserSubscriptionResponse {
     pub subscription: UserSubscription,
     pub tier_config: TierConfig,
 }
+
+
+#[cw_serde]
+pub struct GetUserTokenResponse {
+    pub user_address: String,
+    pub has_active_token: bool,
+    pub token: Option<String>,
+    pub timestamp: u64,
+}
+
